@@ -53,26 +53,72 @@ gaze_pipeline = Pipeline(
     arch='ResNet50',
     device=device  # GPU 사용 가능하면 GPU 사용
 )
- 
+
+# 웹캠 초기화 및 설정
 cap = cv2.VideoCapture(0)
 
-# 웹캠 해상도 설정
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)  # 너비 설정
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)  # 높이 설정
+# MJPG 코덱 설정 (먼저 설정)
+fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+cap.set(cv2.CAP_PROP_FOURCC, fourcc)
 
-# 웹캠 FPS 설정 (30fps로 설정)
-cap.set(cv2.CAP_PROP_FPS, 60)
+# 다른 설정들
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap.set(cv2.CAP_PROP_FPS, 60)  # 180이 지원되지 않을 수 있어 60으로 조정
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+# 설정이 적용되었는지 확인
+print(f"\n실제 카메라 설정:")
+print(f"FPS: {cap.get(cv2.CAP_PROP_FPS)}")
+print(f"해상도: {cap.get(cv2.CAP_PROP_FRAME_WIDTH)}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT)}")
+print(f"코덱: {int(cap.get(cv2.CAP_PROP_FOURCC))}")
+print(f"버퍼 크기: {cap.get(cv2.CAP_PROP_BUFFERSIZE)}")
+
+# 설정 확인
+ret, test_frame = cap.read()
+if ret:
+    print(f"\n실제 프레임 크기: {test_frame.shape}")
+    
+# 지원되는 해상도 확인
+def print_supported_resolutions():
+    test_resolutions = [
+        (640, 480),
+        (1280, 720),
+        (1920, 1080)
+    ]
+    print("\n지원되는 해상도 테스트:")
+    for width, height in test_resolutions:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        print(f"요청: {width}x{height} -> 실제: {actual_width}x{actual_height}")
+
+print_supported_resolutions()
+
+# 원하는 설정으로 다시 설정
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 # 실제 FPS 계산을 위한 변수들
 prev_frame_time = 0
 curr_frame_time = 0
-fps = 0
+fps_list = []  # 최근 FPS 기록을 위한 리스트
+FPS_WINDOW = 30  # FPS 평균을 계산할 윈도우 크기
+
+# 처리 시간 측정을 위한 변수들
+total_model_time = 0
+total_render_time = 0
+frame_count = 0
+print_interval = 30  # 30프레임마다 평균 출력
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
-        
+    
+    frame_count += 1
+    
     # 프레임 크기 조정
     frame = cv2.resize(frame, (960, 720))
 
@@ -80,15 +126,50 @@ while True:
     curr_frame_time = time.time()
     if prev_frame_time != 0:
         fps = 1/(curr_frame_time-prev_frame_time)
+        fps_list.append(fps)
+        if len(fps_list) > FPS_WINDOW:
+            fps_list.pop(0)
     prev_frame_time = curr_frame_time
     
-    # Process frame and visualize
-    results = gaze_pipeline.step(frame)
-    frame = render(frame, results)
+    # 평균 FPS 계산
+    avg_fps = sum(fps_list) / len(fps_list) if fps_list else 0
     
-    # FPS 표시
-    cv2.putText(frame, f'FPS: {fps:.1f}', 
+    # 각 단계별 처리 시간 측정
+    t1 = time.time()
+    results = gaze_pipeline.step(frame)
+    t2 = time.time()
+    frame = render(frame, results)
+    t3 = time.time()
+    
+    # 처리 시간 누적
+    model_time = t2 - t1
+    render_time = t3 - t2
+    total_model_time += model_time
+    total_render_time += render_time
+    
+    # 30프레임마다 평균 처리 시간 출력
+    if frame_count % print_interval == 0:
+        avg_model_time = (total_model_time / print_interval) * 1000  # ms로 변환
+        avg_render_time = (total_render_time / print_interval) * 1000
+        print(f"\n=== 성능 분석 (최근 {print_interval}프레임 평균) ===")
+        print(f"모델 처리 시간: {avg_model_time:.1f}ms")
+        print(f"렌더링 시간: {avg_render_time:.1f}ms")
+        print(f"총 처리 시간: {(avg_model_time + avg_render_time):.1f}ms")
+        print(f"현재 FPS: {avg_fps:.1f}")
+        print("=====================================")
+        # 누적값 초기화
+        total_model_time = 0
+        total_render_time = 0
+    
+    # 처리 시간 표시
+    cv2.putText(frame, f'FPS: {avg_fps:.1f}', 
                 (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 
+                0.7, (0, 255, 0), 2)
+    cv2.putText(frame, f'Model: {model_time*1000:.1f}ms', 
+                (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 
+                0.7, (0, 255, 0), 2)
+    cv2.putText(frame, f'Render: {render_time*1000:.1f}ms', 
+                (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 
                 0.7, (0, 255, 0), 2)
     
     # Get gaze angles and convert to screen coordinates
@@ -96,7 +177,7 @@ while True:
         for pitch, yaw in zip(results.pitch, results.yaw):
             # 각도 값 출력
             cv2.putText(frame, f'Angles - Pitch: {pitch:.1f}, Yaw: {yaw:.1f}', 
-                       (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 
+                       (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 
                        0.7, (0, 255, 0), 2)
 
             # 측정 시작된 경우에만 좌표 저장
@@ -112,18 +193,18 @@ while True:
             
                 # 화면에 정보 표시
                 cv2.putText(frame, f'Gaze point: ({x:.1f}cm, {y:.1f}cm)', 
-                        (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 
+                        (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 
                         0.7, (0, 255, 0), 2)
                 
                 # 측정 상태 표시
                 status = "measurement in progress" if measurement_started else "press space bar to start measurement"
                 cv2.putText(frame, f'Status: {status}', 
-                        (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 
+                        (20, 190), cv2.FONT_HERSHEY_SIMPLEX, 
                         0.7, (0, 255, 0), 2)
                 
                 # 저장된 좌표 개수 표시
                 cv2.putText(frame, f'Saved coordinates: {len(gaze_coordinates)}', 
-                        (20, 200), cv2.FONT_HERSHEY_SIMPLEX, 
+                        (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 
                         0.7, (0, 255, 0), 2)
         
     # Display the frame
